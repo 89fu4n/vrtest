@@ -54,6 +54,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var glView: GLSurfaceView
     private lateinit var renderer: MRRenderer
     private lateinit var hands: HandTracker
+    private lateinit var gyro: HeadTracker
     private val main = Handler(Looper.getMainLooper())
 
     /** Rotation given to ARCore. Auto unless overridden in Settings. */
@@ -84,11 +85,12 @@ class MainActivity : AppCompatActivity() {
 
         hands = HandTracker(this)
         hands.init()
+        gyro = HeadTracker(this) { displayRotation }
 
         root = FrameLayout(this)
         setContentView(root)
 
-        renderer = MRRenderer(this, hands)
+        renderer = MRRenderer(this, hands, gyro)
         loadSettings()
         applyOrientation()
 
@@ -520,6 +522,7 @@ class MainActivity : AppCompatActivity() {
         super.onResume()
         (getSystemService(DISPLAY_SERVICE) as DisplayManager).registerDisplayListener(displayListener, main)
         updateRotation()
+        gyro.start()
         startAr()
         glView.onResume()
         renderer.windows.forEach { it.web.onResume() }
@@ -527,6 +530,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onPause() {
         (getSystemService(DISPLAY_SERVICE) as DisplayManager).unregisterDisplayListener(displayListener)
+        gyro.stop()
         glView.onPause()
         renderer.session = null
         session?.pause()

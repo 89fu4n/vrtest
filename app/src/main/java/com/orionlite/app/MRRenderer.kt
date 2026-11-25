@@ -43,7 +43,8 @@ import kotlin.math.sin
  */
 class MRRenderer(
     private val act: MainActivity,
-    private val hands: HandTracker
+    private val hands: HandTracker,
+    private val gyro: HeadTracker
 ) : GLSurfaceView.Renderer {
 
     val windows = CopyOnWriteArrayList<WebWindow>()
@@ -80,6 +81,10 @@ class MRRenderer(
     private val rawTexCoords = FloatArray(8)
     private lateinit var bgTexCoords: FloatBuffer
     @Volatile var tracking = false
+    private var gyroBackup = false          // ARCore paused, gyro keeps windows in place
+    private var arRotLast = FloatArray(9)
+    private var gyroLast = FloatArray(9)
+    private var lastHandSubmit = 0L
     private var trackingInfo = "starting"
     private var everTracked = false
 
@@ -205,11 +210,6 @@ class MRRenderer(
         updateBgCoords()
 
         tracking = cam.trackingState == TrackingState.TRACKING
-        trackingInfo = when {
-            tracking -> "AR ✓"
-            cam.trackingState == TrackingState.PAUSED -> "AR paused: " + reason(cam.trackingFailureReason)
-            else -> "AR stopped"
-        }
         if (tracking) {
             cam.getViewMatrix(view, 0)
             cam.getProjectionMatrix(projRaw, 0, 0.05f, 50f)
@@ -220,7 +220,31 @@ class MRRenderer(
             val ay = pose.rotateVector(floatArrayOf(0f, 1f, 0f))
             val az = pose.rotateVector(floatArrayOf(0f, 0f, 1f))
             headRot = floatArrayOf(ax[0], ay[0], az[0], ax[1], ay[1], az[1], ax[2], ay[2], az[2])
+            arRotLast = headRot
+            gyroLast = gyro.matrix
+            gyroBackup = false
             if (!everTracked) { everTracked = true; act.runOnUiThread { act.onFirstTracking() } }
+        } else if (everTracked && gyro.hasData) {
+            // ARCore lost tracking: keep the last position, turn the view with the gyro
+            val g0 = gyroLast; val g = gyro.matrix
+            val delta = FloatArray(9)   // g0^T * g  (rotation since the last good frame, in camera space)
+            for (r in 0..2) for (c in 0..2) delta[r * 3 + c] = g0[r] * g[c] + g0[3 + r] * g[3 + c] + g0[6 + r] * g[6 + c]
+            val rot = FloatArray(9)
+            for (r in 0..2) for (c in 0..2) rot[r * 3 + c] = arRotLast[r * 3] * delta[c] + arRotLast[r * 3 + 1] * delta[3 + c] + arRotLast[r * 3 + 2] * delta[6 + c]
+            headRot = rot
+            val p = headPos
+            Matrix.setIdentityM(view, 0)
+            for (r in 0..2) {
+                for (c in 0..2) view[c * 4 + r] = rot[c * 3 + r]
+                view[12 + r] = -(rot[r] * p[0] + rot[3 + r] * p[1] + rot[6 + r] * p[2])
+            }
+            gyroBackup = true
+        }
+        trackingInfo = when {
+            tracking -> "AR ✓"
+            gyroBackup -> "AR paused (gyro on): " + reason(cam.trackingFailureReason)
+            cam.trackingState == TrackingState.PAUSED -> "AR paused: " + reason(cam.trackingFailureReason)
+            else -> "AR stopped"
         }
         if (haveProj) {
             projRaw.copyInto(proj)
@@ -229,7 +253,9 @@ class MRRenderer(
         }
 
         // camera image for hand tracking
-        if (hands.ready && !hands.busy) {
+        val nowMs = SystemClock.uptimeMillis()
+        if (hands.ready && !hands.busy && nowMs - lastHandSubmit >= 50) {
+            lastHandSubmit = nowMs
             try { frame.acquireCameraImage().use { hands.submit(it) } }
             catch (_: NotYetAvailableException) {} catch (_: Exception) {}
         }
@@ -415,7 +441,7 @@ class MRRenderer(
             if (!down) touchActive = false
             if (lastSource != "touch") { smInit = false; lastSource = "touch" }
         } else {
-            if (!hands.visible || !tracking) {
+            if (!hands.visible || !(tracking || gyroBackup)) {
                 cursorVisible = false; smInit = false
                 hovered = null; setHoverBtn(null, null)
                 endPress(); drag = null; resize = null; hold = null; wasDown = false
